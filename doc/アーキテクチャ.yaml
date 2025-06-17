@@ -1,0 +1,265 @@
+# ===================================================================
+# LangGraph ReAct型エージェント ワークフロー設計書
+# Version: 1.1
+# Last Updated: 2025-06-18
+#
+# このドキュメントは、LangGraphフレームワークを用いた
+# 階層型エージェントワークフローの全体設計を定義します。
+# ===================================================================
+
+# -------------------------------------------------------------------
+# 1. 設計思想 (Design Philosophy)
+# -------------------------------------------------------------------
+design_philosophy:
+  purpose: >
+    複雑なビジネスタスク（例：売掛金の消込処理）を、複数の自律的なAIエージェントが協調して解決するための、
+    スケーラブルでメンテナンス性の高いアーキテクチャを構築する。
+    人間のオペレーターは最終的な目標を指示するだけで、AIが計画立案から実行までを担うことを目指す。
+
+  core_principles:
+    - name: "役割の明確化と継承 (Clear Separation & Inheritance)"
+      description: >
+        ワークフローの司令塔「Supervisor」、全専門エージェントの共通機能を担う「BaseTaskAgent」、
+        そして特定の専門技能を持つ「TaskAgent（専門家）」の役割を完全に分離し、階層化する。
+        専門家はBaseTaskAgentを継承することで、コードの再利用性を高め、拡張を容易にする。
+
+    - name: "中央集権的なオーケストレーション (Centralized Orchestration)"
+      description: >
+        「Supervisor」がワークフロー全体の状態を一元管理し、タスクの割り当てや進行管理を行う。
+        これにより、プロセス全体の見通しが良くなり、一貫性のある制御が可能となる。
+
+    - name: "自律的な専門家 (Autonomous Specialists)"
+      description: >
+        各「TaskAgent」は、自身の専門領域において「ReAct（Reason and Act）」と呼ばれる思考サイクルを用いる。
+        与えられたタスクに対して、自ら思考し、必要なツールを判断・実行することで、動的な問題解決を実現する。
+
+    - name: "設定の外部化とモジュール性 (Externalized Configuration & Modularity)"
+      description: >
+        LLMのモデル名、プロンプト、ツールの定義など、変更の可能性がある要素はすべてYAMLで管理する。
+        これにより、コードを変更することなくシステムの振る舞いを調整できる。
+        新しい専門家の追加も、この設計書への追記によって容易に行える。
+
+    - name: "動的な適応性 (Dynamic Adaptability)"
+      description: >
+        Supervisorは、タスクの内容をLLMを用いて解釈し、その時点で最も適したTaskAgentを動的に選択する。
+        これにより、固定的なワークフローでは対応できない、予期せぬ状況にも柔軟に対応する能力を持つ。
+
+# -------------------------------------------------------------------
+# 2. 共通設定 (Common Configuration)
+# -------------------------------------------------------------------
+common_config:
+  description: >
+    すべてのエージェントで共有される基本的な設定。
+    ここを変更するだけで、システム全体の基本動作を一括で変更できる。
+  llm_model: "gpt-4.1-mini" # 全エージェントが使用するLLMモデル
+  llm_temperature: 0.0      # LLMの出力の決定性を最大にする（再現性のため）
+  max_react_iterations: 7   # 各Task AgentのReActループ（思考→行動）の最大繰り返し回数。無限ループを防ぐ。
+
+# -------------------------------------------------------------------
+# 3. 状態定義 (State Definitions)
+# -------------------------------------------------------------------
+state_definitions:
+  description: >
+    ワークフローを通じてやり取りされるデータ構造（状態）を定義する。
+    状態を明確に定義することで、エージェント間の情報伝達を安定させる。
+
+  # 3.1. グローバルエージェントの状態
+  global_agent_state:
+    description: >
+      Supervisorが管理するワークフロー全体の永続的な状態。
+      タスク計画、進行状況、成果物など、すべてがここに集約される。
+    fields:
+      input_instruction:
+        type: "str"
+        description: "人間のユーザーから最初に与えられる、達成したい目標の指示。"
+      task_plan:
+        type: "Dict[str, Task]"
+        description: "InstructionPlannerによって生成されたタスク計画。タスクIDをキーとする辞書形式で管理される。"
+      completed_tasks:
+        type: "List[str]"
+        description: "完了したタスクのIDを格納するリスト。タスクの依存関係解決に使用される。"
+      current_task_id:
+        type: "Optional[str]"
+        description: "現在実行中、または次に実行すべきタスクのID。ワークフローはシーケンシャルに進行する。"
+      artifacts:
+        type: "Dict[str, Any]"
+        description: "ワークフロー全体で共有される成果物のストア。ファイルパスやデータフレームなどがタスク間で受け渡される。"
+      process_status:
+        type: "str"
+        description: "ワークフロー全体の高レベルなステータス。（例: 'planning', 'running', 'success', 'failed'）"
+
+  # 3.2. ベースタスクエージェントの状態
+  base_task_agent_state:
+    description: >
+      全てのTaskAgentが継承するBaseTaskAgentが、内部で持つ一時的な状態。
+      この状態はタスクの完了と共に破棄される。
+    fields:
+      task_to_perform:
+        type: "Task"
+        description: "Supervisorから実行を指示されたTaskオブジェクト。Agentの思考の起点となる。"
+      required_artifacts:
+        type: "Dict[str, Any]"
+        description: "タスク実行に必要となる、先行タスクが生成した成果物。"
+      intermediate_steps:
+        type: "List[Tuple[Action, Observation]]"
+        description: "ReActループにおける思考（Action）とツール実行結果（Observation）の履歴。LLMはこれを参照して次の思考を行う。"
+      final_result:
+        type: "Optional[Dict[str, Any]]"
+        description: "タスクの最終成果物。この内容がSupervisorによってGlobalAgentStateのartifactsにマージされる。"
+      status_report:
+        type: "str"
+        description: "タスク実行の最終ステータス報告。（例: 'completed', 'failed'）"
+
+# --- 補足: 状態定義で参照されるデータオブジェクトのスキーマ ---
+# ※これらのオブジェクトは、実際のコード上ではPydanticなどのデータクラスとして実装されることを想定。
+#
+# Task:
+#   id: str               # UUIDなどで生成される一意なタスクID
+#   name: str             # 人間が理解しやすいタスクの名称
+#   description: str      # LLMがタスクの目的を理解するための具体的な指示内容
+#   dependencies: List[str] # このタスクが依存する先行タスクのIDリスト
+#   status: str           # タスクの進行状況（'pending', 'running', 'completed', 'failed'）
+#   expected_output_description: str # SupervisorがTask Agentに指示する「期待される成果物」の具体的な説明。
+#                                  # 例：「'reconciled_path'というキーでCSVファイルのパスを返すこと」
+#
+# Action:
+#   tool: str             # 実行するツールの名前
+#   tool_input: Dict[str, Any] # ツールに渡す引数
+#
+# Observation: Any        # ツールの実行結果
+
+# -------------------------------------------------------------------
+# 4. エージェント定義 (Agent Definitions)
+# -------------------------------------------------------------------
+agent_definitions:
+  description: >
+    ワークフローを構成する各エージェントの役割、階層、インターフェースを定義する。
+
+  # 4.1. オーケストレーター (司令塔)
+  - name: "Supervisor"
+    type: "Orchestrator"
+    description: >
+      ワークフロー全体の進行を管理する中央制御エージェント。LLMの判断力を活用し、動的なタスク割り当てを行う。
+
+  # 4.2. ベースエージェント (テンプレート)
+  - name: "BaseTaskAgent"
+    type: "AbstractTaskAgent"
+    description: >
+      全ての専門TaskAgentの基底クラスとなる汎用ReActエージェント。
+      ReActの思考ループ実行、Supervisorとの通信（状態の受け取り・結果報告）といった共通機能を担う。
+      このエージェント自体が直接タスクを実行することはなく、あくまで専門エージェントのテンプレートとして機能する。
+
+  # 4.3. 具象タスクエージェント (専門家)
+  - name: "InstructionPlanner"
+    type: "TaskAgent"
+    description: >
+      BaseTaskAgentを継承し、ユーザー指示の解釈とタスク計画の生成に特化した専門家。
+    design_file: "instruction_planner_design"
+
+  - name: "FileSearchExpert"
+    type: "TaskAgent"
+    description: >
+      BaseTaskAgentを継承し、ファイルシステムの検索と特定に特化した専門家。
+    design_file: "file_search_expert_design"
+
+  - name: "ReconciliationExpert"
+    type: "TaskAgent"
+    description: >
+      BaseTaskAgentを継承し、財務データの消込処理に特化した専門家。
+    design_file: "reconciliation_expert_design"
+
+# -------------------------------------------------------------------
+# 5. タスクエージェント詳細設計 (Task Agent Designs)
+# -------------------------------------------------------------------
+task_agent_designs:
+  description: >
+    各専門TaskAgentがBaseTaskAgentから継承した機能に加え、独自に持つ設定やツールを定義する。
+
+# 5.1. InstructionPlannerの詳細設計
+  instruction_planner_design:
+    agent_specific_metadata:
+      manuals_directory: "./manuals" # 手順書が格納されているディレクトリ
+      planning_prompt_suffix: >
+        ユーザーの元指示と参照した手順書の内容を組み合わせ、
+        具体的で実行可能なステップバイステップのタスクリストを生成してください。
+    tools:
+      - name: "search_manuals_tool"
+        description: >
+          指定されたキーワードに基づき、手順書ディレクトリ内から関連性の高い手順書ファイルを検索し、
+          ファイルパスのリストを返す。
+        parameters:
+          - name: "keywords"
+            type: "List[str]"
+            description: "ユーザー指示から抽出した、検索のためのキーワード（例: ['売掛金', '消込']）"
+            required: true
+      - name: "read_file_content_tool"
+        description: "指定されたファイルのテキスト内容をすべて読み込んで返す。"
+        parameters:
+          - name: "file_path"
+            type: "str"
+            description: "読み込むファイルのパス"
+            required: true
+  # 5.2. FileSearchExpertの詳細設計
+  file_search_expert_design:
+    agent_specific_metadata:
+      root_search_directory: "./data"
+    tools:
+      - name: "file_search_tool"
+        description: "指定されたディレクトリ内でパターンに一致するファイルを再帰的に検索する。"
+        parameters:
+          - name: "directory"
+            type: "str"
+            required: true
+          - name: "filename_pattern"
+            type: "str"
+            required: true
+      - name: "file_content_preview_tool"
+        description: "ファイルの先頭数行を読み込み、内容のプレビューを返す。ファイルが正しいか判断するために使用する。"
+        parameters:
+          - name: "file_path"
+            type: "str"
+            required: true
+
+  # 5.3. ReconciliationExpertの詳細設計
+  reconciliation_expert_design:
+    agent_specific_metadata:
+      output_base_directory: "./results"
+    tools:
+      - name: "load_data_tool"
+        description: "指定されたCSVまたはExcelファイルからデータをpandas DataFrameとしてロードする。"
+        parameters:
+          - name: "file_path"
+            type: "str"
+            required: true
+      - name: "find_matching_keys_tool"
+        description: >
+          二つのDataFrameのプレビュー（列名、データ型、サンプル値）をLLMに提示し、
+          意味的に最も一致する可能性が高い突合キーのペアを推論して返す。人間の直感に近い判断を行う。
+        parameters:
+          - name: "df1_preview"
+            type: "Dict"
+            required: true
+          - name: "df2_preview"
+            type: "Dict"
+            required: true
+      - name: "perform_reconciliation_tool"
+        description: "二つのDataFrameを指定されたキーでマージし、消込処理を実行する。消込済みデータと未消込データを返す。"
+        parameters:
+          - name: "deposit_df"
+            type: "DataFrame"
+            required: true
+          - name: "billing_df"
+            type: "DataFrame"
+            required: true
+          - name: "join_keys"
+            type: "List[str]"
+            required: true
+      - name: "output_csv_tool"
+        description: "DataFrameを指定されたパスにCSV形式で出力し、出力したパスを返す。"
+        parameters:
+          - name: "df"
+            type: "DataFrame"
+            required: true
+          - name: "output_path"
+            type: "str"
+            required: true

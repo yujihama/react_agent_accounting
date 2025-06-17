@@ -1,0 +1,40 @@
+# Python specific
+__pycache__/
+*.pyc
+*.pyd
+*.so
+
+# Virtual environment
+.venv/
+env/
+venv/
+build/
+develop-eggs/
+dist/
+egg-info/
+*.egg-info
+
+# IDEs
+.vscode/
+.idea/
+.project/
+.classpath/
+.settings/
+
+# OS generated files
+.DS_Store
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment variables
+.env
+
+# Data outputs
+data/output/
+
+# Logs
+*.log
+
+# Cursor related files
+.cursor/ 

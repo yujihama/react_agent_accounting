@@ -1,0 +1,102 @@
+# ===================================================================
+# Test Case Expectation: ユースケース「売掛金消込」
+# Version: 1.0
+#
+# このドキュメントは、設計書v1.1に基づいたワークフローの
+# 期待される動作シーケンスを定義します。
+# ===================================================================
+
+test_case_expectation:
+  use_case_name: "売掛金消込 (Accounts Receivable Reconciliation)"
+  initial_user_instruction: "6月の入金CSVと5月の請求書Excelを使って売掛金の消込を行い、結果を消込済み・未消込の2つのCSVファイルに出力してください。"
+
+  # ワークフローの期待されるステップごとの動作
+  workflow_steps:
+    # -----------------------------------------------------------------
+    - step_id: 1
+      title: "計画立案フェーズ: ナレッジに基づいたタスク生成"
+      primary_agents: ["Supervisor", "InstructionPlanner"]
+      objective: "ユーザーの自然言語指示に基づき、関連する社内手順書を検索・参照し、状況に合わせた具体的なタスク計画を生成する。"
+      
+      detailed_flow:
+        - "[Supervisor]: ワークフローを開始し、`input_instruction` をセット。`InstructionPlanner`に対し、指示内容を達成するための計画立案を指示する。"
+        - "[InstructionPlanner | ReAct Thought 1]: 『売掛金消込』の指示だ。関連手順書を `./manuals` から探そう。キーワードは『売掛金』と『消込』だ。"
+        - "[InstructionPlanner | ReAct Action 1]: `search_manuals_tool(keywords=['売掛金', '消込'])` を実行。"
+        - "[InstructionPlanner | ReAct Observation 1]: `['./manuals/accounts_receivable_reconciliation.md']` を取得。"
+        - "[InstructionPlanner | ReAct Thought 2]: 手順書を発見。`read_file_content_tool`で内容を読み、計画のテンプレートとして利用する。"
+        - "[InstructionPlanner | ReAct Action 2]: `read_file_content_tool(file_path='./manuals/accounts_receivable_reconciliation.md')` を実行。"
+        - "[InstructionPlanner | ReAct Observation 2]: 手順書テキスト（'標準消込手順: 1. `deposit_YYYYMM.csv`形式の入金ファイルを探す...'）を取得。"
+        - "[InstructionPlanner | ReAct Thought 3]: 手順書テンプレートとユーザー指示の具体情報（'6月', '5月'）を統合し、最終的なタスク計画を生成する。"
+        - "[InstructionPlanner]: 生成したタスク計画を `final_result` としてSupervisorに報告する。"
+
+      state_update_summary:
+        - "`GlobalAgentState.task_plan` に3つのタスク（入金ファイル検索、請求書ファイル検索、消込実行）が設定される。"
+        - "`GlobalAgentState.process_status` が 'running' に更新される。"
+    # -----------------------------------------------------------------
+    - step_id: 2
+      title: "タスク実行: 入金ファイルの特定"
+      primary_agents: ["Supervisor", "FileSearchExpert"]
+      objective: "最初のタスクとして、指示された入金データファイルをファイルシステムから特定する。"
+
+      detailed_flow:
+        - "[Supervisor]: 計画に基づき、次のタスク `task-01` を決定。タスク内容から `FileSearchExpert` を選択し、実行を指示する。"
+        - "[FileSearchExpert | ReAct Thought 1]: 'June 2025 deposits' のCSVファイルを探す。ファイル名は 'deposit_202506.csv' だろう。"
+        - "[FileSearchExpert | ReAct Action 1]: `file_search_tool(directory='./data', filename_pattern='deposit_202506.csv')` を実行。"
+        - "[FileSearchExpert | ReAct Observation 1]: `['./data/deposit_202506.csv']` を取得。"
+        - "[FileSearchExpert | ReAct Thought 2]: ファイルを特定完了。指示通り `deposit_file_path` というキーでパスを報告する。"
+        - "[FileSearchExpert]: `final_result` として `{'deposit_file_path': './data/deposit_202506.csv'}` をSupervisorに報告する。"
+
+      state_update_summary:
+        - "`GlobalAgentState.artifacts` に `deposit_file_path` が追加される。"
+        - "`GlobalAgentState.completed_tasks` に `task-01` が追加される。"
+    # -----------------------------------------------------------------
+    - step_id: 3
+      title: "タスク実行: 請求書ファイルの特定（複数候補からの絞り込み）"
+      primary_agents: ["Supervisor", "FileSearchExpert"]
+      objective: "請求書ファイルを特定する。複数候補がある場合は、内容をプレビューして最適な一つを選択する。"
+
+      detailed_flow:
+        - "[Supervisor]: 次のタスク `task-02` を決定し、`FileSearchExpert` に実行を指示する。"
+        - "[FileSearchExpert | ReAct Thought 1]: 'May 2025 billings' のExcelファイルを探す。`*billing_202505*.xlsx` で検索しよう。"
+        - "[FileSearchExpert | ReAct Action 1]: `file_search_tool` を実行し、複数候補 `['..._draft.xlsx', '...final.xlsx']` を取得。"
+        - "[FileSearchExpert | ReAct Thought 2]: 候補が複数あるため、`file_content_preview_tool` で両方の内容を確認し、どちらが最終版か判断する。"
+        - "[FileSearchExpert | ReAct Action 2]: `file_content_preview_tool` を2回実行し、各ファイルの内容を比較。"
+        - "[FileSearchExpert | ReAct Thought 3]: プレビューの結果、`...final.xlsx` が正しいファイルだと判断。これを採用する。"
+        - "[FileSearchExpert]: `final_result` として `{'billing_file_path': './data/billing_202505_final.xlsx'}` をSupervisorに報告する。"
+
+      state_update_summary:
+        - "`GlobalAgentState.artifacts` に `billing_file_path` が追加される。"
+        - "`GlobalAgentState.completed_tasks` に `task-02` が追加される。"
+    # -----------------------------------------------------------------
+    - step_id: 4
+      title: "タスク実行: 消込処理と結果出力"
+      primary_agents: ["Supervisor", "ReconciliationExpert"]
+      objective: "2つのデータファイルを使い、キーを特定して消込を行い、結果を2つのCSVファイルに出力する。"
+
+      detailed_flow:
+        - "[Supervisor]: 次のタスク `task-03` を決定。依存関係が満たされていることを確認し、`ReconciliationExpert` を選択。必要なファイルパスを `required_artifacts` として渡して実行を指示。"
+        - "[ReconciliationExpert | ReAct Thought 1]: 2つのファイルパスを受け取った。まず `load_data_tool` で両方をロードする。"
+        - "[ReconciliationExpert | ReAct Action 1]: `load_data_tool` を2回実行し、データフレームを取得。"
+        - "[ReconciliationExpert | ReAct Thought 2]: 次に突合キーを特定する。`find_matching_keys_tool` を使い、LLMにキーを推論させる。"
+        - "[ReconciliationExpert | ReAct Action 2]: `find_matching_keys_tool` を実行し、`['顧客ID', '請求額']` などのキー候補を取得。"
+        - "[ReconciliationExpert | ReAct Thought 3]: 特定したキーで `perform_reconciliation_tool` を使い、消込を実行する。"
+        - "[ReconciliationExpert | ReAct Action 3]: `perform_reconciliation_tool` を実行し、消込済み・未消込の2つのデータフレームを取得。"
+        - "[ReconciliationExpert | ReAct Thought 4]: 最後に `output_csv_tool` を使い、2つのデータフレームをそれぞれファイルに出力する。"
+        - "[ReconciliationExpert | ReAct Action 4]: `output_csv_tool` を2回実行し、出力パスを取得。"
+        - "[ReconciliationExpert]: `final_result` として `{'reconciled_path': '...', 'unreconciled_path': '...'}` をSupervisorに報告する。"
+
+      state_update_summary:
+        - "`GlobalAgentState.artifacts` に `reconciled_path` と `unreconciled_path` が追加される。"
+        - "`GlobalAgentState.completed_tasks` に `task-03` が追加される。"
+    # -----------------------------------------------------------------
+    - step_id: 5
+      title: "完了フェーズ"
+      primary_agents: ["Supervisor"]
+      objective: "全てのタスクが完了したことを確認し、ワークフローを正常に終了する。"
+
+      detailed_flow:
+        - "[Supervisor]: `task_plan` の全タスクが `completed_tasks` リストに含まれていることを確認する。"
+        - "[Supervisor]: 最終成果物が生成されていることを確認し、プロセス全体が成功したと判断する。"
+
+      state_update_summary:
+        - "`GlobalAgentState.process_status` が 'success' に更新される。"

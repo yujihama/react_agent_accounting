@@ -1,0 +1,30 @@
+# ===================================================================
+# LangGraph ReAct型エージェント 共通設定ファイル
+# Version: 1.0
+# Last Updated: 2025-01-17
+# ===================================================================
+
+# 共通設定
+common:
+  llm_model: "gpt-4o-mini"  # 全エージェントが使用するLLMモデル
+  llm_temperature: 0.0       # LLMの出力の決定性を最大にする（再現性のため）
+  max_react_iterations: 7    # 各Task AgentのReActループの最大繰り返し回数
+
+# 実行環境設定
+environment:
+  manuals_directory: "./data/instructions"
+  data_directory: "./data"
+  output_directory: "./data/output"
+  
+# エージェント固有の設定
+agents:
+  instruction_planner:
+    planning_prompt_suffix: |
+      ユーザーの元指示と参照した手順書の内容を組み合わせ、
+      具体的で実行可能なステップバイステップのタスクリストを生成してください。
+  
+  file_search_expert:
+    root_search_directory: "./data"
+    
+  reconciliation_expert:
+    output_base_directory: "./data/output" 
