@@ -1,0 +1,4 @@
+billing_id,billing_date,customer_name,amount,due_date
+B001,2025-07-01,CustomerA,10000,2025-07-31
+B002,2025-07-02,CustomerB,20000,2025-07-31
+B003,2025-07-03,CustomerC,15000,2025-07-31
