@@ -6,9 +6,9 @@
 
 # 共通設定
 common:
-  llm_model: "gpt-4o-mini"  # 全エージェントが使用するLLMモデル
+  llm_model: "gpt-4.1-mini"  # 全エージェントが使用するLLMモデル
   llm_temperature: 0.0       # LLMの出力の決定性を最大にする（再現性のため）
-  max_react_iterations: 7    # 各Task AgentのReActループの最大繰り返し回数
+  max_react_iterations: 20    # 各Task AgentのReActループの最大繰り返し回数
 
 # 実行環境設定
 environment:
@@ -18,13 +18,44 @@ environment:
   
 # エージェント固有の設定
 agents:
-  instruction_planner:
-    planning_prompt_suffix: |
-      ユーザーの元指示と参照した手順書の内容を組み合わせ、
-      具体的で実行可能なステップバイステップのタスクリストを生成してください。
-  
-  file_search_expert:
+  filesearch_expert:
+    description: "ファイルの検索と特定に特化した専門家（ファイルパスを返却する）"
+    skills:
+      - "ディレクトリ内のファイル検索"
+      - "パターンマッチングによるファイル特定"
+      - "ファイル内容のプレビューと検証"
+      - "ファイルパスの解決"
+    suitable_for:
+      - "ファイルの検索と特定"
+      - "データファイルの内容確認"
+      - "複数候補からの最適ファイル選択"
+    not_suitable_for:
+      - "数値計算や統計処理"
+      - "データ内容の取得"
+    tools:
+      - "file_search_tool: ファイル検索"
+      - "file_content_preview_tool: ファイルプレビュー"
+      - "list_directory_tool: ディレクトリ一覧"
     root_search_directory: "./data"
     
   reconciliation_expert:
+    description: "財務データの消込処理に特化した専門家"
+    skills:
+      - "売掛金と入金データの照合"
+      - "データの差異分析"
+      - "消込処理の実行"
+      - "照合結果レポートの生成"
+    suitable_for:
+      - "売掛金データと入金データの消込"
+      - "財務データの照合処理"
+      - "差異レポートの作成"
+      - "データクレンジング"
+    not_suitable_for:
+      - "ファイルの検索や特定"
+      - "タスク計画の作成"
+      - "手順書の参照"
+    tools:
+      - "load_data_tool: 指定されたパスのデータ読み込み"
+      - "reconcile_data_tool: データ照合"
+      - "generate_report_tool: レポート生成"
     output_base_directory: "./data/output" 

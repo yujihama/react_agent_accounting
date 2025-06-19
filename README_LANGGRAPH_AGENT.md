@@ -101,7 +101,7 @@ print(f"成果物: {result.artifacts}")
 
 `config/common_config.yaml`で以下の設定を変更できます：
 
-- LLMモデル（デフォルト: gpt-4o-mini）
+- LLMモデル（デフォルト: gpt-4.1-mini）
 - 温度パラメータ
 - ReActループの最大反復回数
 - 各エージェント固有の設定

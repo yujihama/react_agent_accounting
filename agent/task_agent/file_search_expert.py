@@ -5,10 +5,11 @@ FileSearchExpert - ファイルシステムの検索と特定に特化した専�
 import os
 import glob
 import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Type
 from langchain.tools import Tool
 
 from .base import BaseTaskAgent
+from ..states import FileSearchReActResponse
 
 
 class FileSearchExpert(BaseTaskAgent):
@@ -19,40 +20,114 @@ class FileSearchExpert(BaseTaskAgent):
     
     def get_agent_description(self) -> str:
         """エージェントの説明を返す"""
-        return "ファイルシステムを検索し、パターンマッチングやファイル内容の確認を通じて必要なファイルを特定する専門家です。"
+        return "フォルダを検索し、パターンマッチングやファイル内容の確認を通じて必要なファイルを特定し、ファイルパスを返す専門家です。"
+    
+    def get_result_format(self) -> str:
+        """
+        エージェントの結果のフォーマットを返す
+        """
+        return "<ファイルタイトル>:<対象ファイルパス>"
+
+    def get_response_model(self) -> Type[FileSearchReActResponse]:
+        """
+        FileSearchExpert専用のレスポンスモデルを返す
+        発見されたファイルリストを含む追加フィールドを持つ
+        """
+        return FileSearchReActResponse
+    
+    def _normalize_directory_path(self, directory: str) -> str:
+        """
+        ディレクトリパスを正規化し、data/inputをルートディレクトリとして扱う
+        
+        Args:
+            directory: 入力されたディレクトリパス
+            
+        Returns:
+            正規化されたディレクトリパス
+        """
+        # data/inputをベースディレクトリとして設定
+        base_dir = os.path.join(os.getcwd(), 'data', 'input')
+        
+        # 「/」や空文字列の場合はdata/inputをそのまま返す
+        if directory in ['/', '', '.']:
+            return base_dir
+        
+        # 絶対パスの場合はそのまま返す
+        if os.path.isabs(directory):
+            return directory
+        
+        # 相対パスの場合はdata/inputをベースとして結合
+        return os.path.join(base_dir, directory.lstrip('./'))
+    
+    def _normalize_file_path(self, file_path: str) -> str:
+        """
+        ファイルパスを正規化し、data/inputをルートディレクトリとして扱う
+        
+        Args:
+            file_path: 入力されたファイルパス
+            
+        Returns:
+            正規化されたファイルパス
+        """
+        # data/inputをベースディレクトリとして設定
+        base_dir = os.path.join(os.getcwd(), 'data', 'input')
+        
+        # 絶対パスの場合はそのまま返す
+        if os.path.isabs(file_path):
+            return file_path
+        
+        # ファイルパスが「/」で始まる場合は、data/inputをベースとして結合
+        if file_path.startswith('/'):
+            return os.path.join(base_dir, file_path.lstrip('/'))
+        
+        # 相対パスの場合はdata/inputをベースとして結合
+        return os.path.join(base_dir, file_path.lstrip('./'))
     
     def get_tools(self) -> List[Tool]:
-        """FileSearchExpert固有のツールを返す"""
-        return [
+        """FileSearchExpert固有のツールを返す（共通ツールを含む）"""
+        return self.get_common_tools() + [
             Tool(
                 name="file_search_tool",
-                func=self._file_search,
-                description="指定されたディレクトリ内でパターンに一致するファイルを再帰的に検索する。"
+                func=self._file_search_wrapper,
+                description="指定されたディレクトリ内でパターンに一致するファイルを再帰的に検索する。\n引数:\n- directory (str): 検索対象のディレクトリパス\n- filename_pattern (str): ファイル名のパターン（ワイルドカード使用可能、例：'*.csv'）"
             ),
             Tool(
                 name="file_content_preview_tool",
-                func=self._file_content_preview,
-                description="ファイルの先頭数行を読み込み、内容のプレビューを返す。ファイルが正しいか判断するために使用する。"
+                func=self._file_content_preview_wrapper,
+                description="ファイルの先頭数行を読み込み、内容のプレビューを返す。\n引数:\n- file_path (str): プレビューするファイルのパス\n- lines (int, 省略可能): 読み込む行数（デフォルト: 10）"
             ),
             Tool(
                 name="list_directory_tool",
                 func=self._list_directory,
-                description="指定されたディレクトリの内容をリストする。"
+                description="指定されたディレクトリの内容をリストする。\n引数:\n- directory (str): リストするディレクトリのパス"
             )
         ]
+    
+    def _file_search_wrapper(self, **kwargs) -> List[str]:
+        """
+        ファイル検索のラッパー関数（LLMからの呼び出しに対応）
+        """
+        directory = kwargs.get('directory', '/')
+        filename_pattern = kwargs.get('filename_pattern') or kwargs.get('pattern') or kwargs.get('keyword', '*')
+        
+        # ディレクトリパスを正規化（data/inputをルートとして扱う）
+        normalized_directory = self._normalize_directory_path(directory)
+        
+        return self._file_search(normalized_directory, filename_pattern)
     
     def _file_search(self, directory: str, filename_pattern: str) -> List[str]:
         """
         指定されたディレクトリ内でパターンに一致するファイルを検索
         
         Args:
-            directory: 検索対象のディレクトリ
+            directory: 検索対象のディレクトリ（すでに正規化済み）
             filename_pattern: ファイル名のパターン（ワイルドカード使用可）
             
         Returns:
             マッチしたファイルパスのリスト
         """
-        # 相対パスを絶対パスに変換
+        # ディレクトリパスはすでに_normalize_directory_pathで正規化されているため、
+        # 絶対パスでない場合のみ絶対パスに変換
         if not os.path.isabs(directory):
             directory = os.path.abspath(directory)
         
@@ -68,17 +143,37 @@ class FileSearchExpert(BaseTaskAgent):
         if not matched_files:
             return [f"パターン '{filename_pattern}' に一致するファイルが見つかりませんでした。"]
         
-        # ファイルの情報を追加
+        # ファイルの情報を追加（相対パスで返す）
         file_info = []
         for file_path in matched_files:
             try:
+                # 指定されたディレクトリからの相対パスを計算
+                relative_path = os.path.relpath(file_path, directory)
                 stat = os.stat(file_path)
                 size_mb = stat.st_size / (1024 * 1024)
-                file_info.append(f"{file_path} (サイズ: {size_mb:.2f}MB)")
+                file_info.append(f"{relative_path} (サイズ: {size_mb:.2f}MB)")
             except:
-                file_info.append(file_path)
+                # エラーの場合も相対パスで返す
+                relative_path = os.path.relpath(file_path, directory)
+                file_info.append(relative_path)
         
         return file_info
+    
+    def _file_content_preview_wrapper(self, **kwargs) -> str:
+        """
+        ファイルプレビューのラッパー関数（LLMからの呼び出しに対応）
+        """
+        file_path = kwargs.get('file_path', '')
+        lines = kwargs.get('lines', 10)
+        
+        # linesが文字列の場合は整数に変換
+        if isinstance(lines, str):
+            try:
+                lines = int(lines)
+            except ValueError:
+                lines = 10
+        
+        return self._file_content_preview(file_path, lines)
     
     def _file_content_preview(self, file_path: str, lines: int = 10) -> str:
         """
@@ -92,6 +187,9 @@ class FileSearchExpert(BaseTaskAgent):
             ファイルのプレビュー内容
         """
         try:
+            # ファイルパスを正規化（data/inputをルートとして扱う）
+            file_path = self._normalize_file_path(file_path)
+            
             # ファイルの存在確認
             if not os.path.exists(file_path):
                 return f"エラー: ファイル '{file_path}' が見つかりません。"
@@ -161,9 +259,8 @@ class FileSearchExpert(BaseTaskAgent):
             ディレクトリ内のファイルとサブディレクトリのリスト
         """
         try:
-            # 相対パスを絶対パスに変換
-            if not os.path.isabs(directory):
-                directory = os.path.abspath(directory)
+            # ディレクトリパスを正規化（data/inputをルートとして扱う）
+            directory = self._normalize_directory_path(directory)
             
             if not os.path.exists(directory):
                 return [f"エラー: ディレクトリ '{directory}' が見つかりません。"]

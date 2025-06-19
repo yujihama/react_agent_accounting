@@ -4,7 +4,7 @@ LangGraph ワークフロー - ReAct型エージェントシステムのワー�
 
 from typing import TypedDict, List, Optional, Dict, Any
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint import MemorySaver
+from langgraph.checkpoint.memory import MemorySaver
 
 from agent.states import GlobalAgentState, ProcessStatus
 from agent.supervisor_agent import Supervisor
@@ -31,10 +31,11 @@ class LangGraphWorkflow:
         """
         self.config_path = config_path
         self.supervisor = Supervisor(config_path)
-        self.workflow = self._build_workflow()
         
         # メモリセーバー（チェックポイント管理）
         self.memory = MemorySaver()
+        
+        self.workflow = self._build_workflow()
     
     def _build_workflow(self) -> StateGraph:
         """ワークフローグラフを構築"""
@@ -199,7 +200,7 @@ class LangGraphWorkflow:
         global_state = state["global_state"]
         executable_tasks = global_state.get_executable_tasks()
         
-        if executable_tasks and not state.get("error_message"):
+        if executable_tasks: #and not state.get("error_message"):
             return "execution"  # まだタスクが残っている
         else:
             return "finalize"

@@ -5,11 +5,12 @@ ReconciliationExpert - 財務データの消込処理に特化した専門家
 import os
 import pandas as pd
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Type
 from langchain.tools import Tool
 from langchain_openai import ChatOpenAI
 
 from .base import BaseTaskAgent
+from ..states import ReconciliationReActResponse
 
 
 class ReconciliationExpert(BaseTaskAgent):
@@ -20,35 +21,70 @@ class ReconciliationExpert(BaseTaskAgent):
     
     def get_agent_description(self) -> str:
         """エージェントの説明を返す"""
-        return "財務データの消込処理を専門とし、売掛金と入金データの突合、マッチング、消込処理を行う専門家です。"
+        return """財務データの消込処理を専門とし、売掛金と入金データの突合、マッチング、消込処理を行う専門家です。
+
+**重要な作業手順:**
+1. まず `list_available_artifacts_tool` で利用可能なデータを確認
+2. `get_artifact_data_tool` で売掛金データと入金データを取得（キーワード: '売掛金', 'billing', '入金', 'deposit'）
+3. データの内容を確認し、突合キーを決定
+4. `perform_reconciliation_tool` で消込処理を実行
+5. 必要に応じて結果をCSVで出力
+
+**データ取得のコツ:**
+- 前のタスクで取得されたデータはartifactsに保存されています
+- '売掛金データ'、'売掛金'、'billing'のいずれかで売掛金データを取得
+- '入金データ'、'入金'、'deposit'のいずれかで入金データを取得"""
+    
+    def get_result_format(self) -> str:
+        """
+        エージェントの結果のフォーマットを返す
+        """
+        return "消込済みデータと未消込データのパスまたはデータ"
+    
+    def get_response_model(self) -> Type[ReconciliationReActResponse]:
+        """
+        ReconciliationExpert専用のレスポンスモデルを返す
+        消込状況やエラー件数を含む追加フィールドを持つ
+        """
+        return ReconciliationReActResponse
     
     def get_tools(self) -> List[Tool]:
-        """ReconciliationExpert固有のツールを返す"""
-        return [
+        """ReconciliationExpert固有のツールを返す（共通ツールを含む）"""
+        return self.get_common_tools() + [
             Tool(
                 name="load_data_tool",
                 func=self._load_data,
-                description="指定されたCSVまたはExcelファイルからデータをpandas DataFrameとしてロードする。"
+                description="指定されたパスのCSVまたはExcelファイルからデータをpandas DataFrameとしてロードする。\n引数:\n- file_path (str): ロードするファイルのパス（.csv、.xlsx、.xls形式対応）"
+            ),
+            Tool(
+                name="get_artifact_data_tool",
+                func=self._get_artifact_data,
+                description="前のタスクで取得されたデータをartifactsから取得する。\n引数:\n- artifact_key (str): 取得したいデータのキー（例：'売掛金データ', '入金データ', 'billing', 'deposit'）"
+            ),
+            Tool(
+                name="list_available_artifacts_tool", 
+                func=self._list_available_artifacts,
+                description="利用可能なartifacts（前のタスクで生成されたデータ）の一覧を表示する。\n引数: なし"
             ),
             Tool(
                 name="find_matching_keys_tool",
                 func=self._find_matching_keys,
-                description="二つのDataFrameのプレビュー（列名、データ型、サンプル値）をLLMに提示し、意味的に最も一致する可能性が高い突合キーのペアを推論して返す。"
+                description="二つのDataFrameのプレビュー（列名、データ型、サンプル値）をLLMに提示し、意味的に最も一致する可能性が高い突合キーのペアを推論して返す。\n引数:\n- df1_preview (dict): 第一のDataFrameのプレビューデータ\n- df2_preview (dict): 第二のDataFrameのプレビューデータ"
             ),
             Tool(
                 name="perform_reconciliation_tool",
                 func=self._perform_reconciliation,
-                description="二つのDataFrameを指定されたキーでマージし、消込処理を実行する。消込済みデータと未消込データを返す。"
+                description="二つのCSVファイルを指定されたキーでマージし、消込処理を実行する。消込済みデータと未消込データを返す。\n引数:\n- deposit_file_path (str): 入金データのCSVファイルパス（data/input配下の相対パス）\n- billing_file_path (str): 売掛金データのCSVファイルパス（data/input配下の相対パス）\n- join_keys (list): 結合に使用するキーのリスト"
             ),
             Tool(
                 name="output_csv_tool",
                 func=self._output_csv,
-                description="DataFrameを指定されたパスにCSV形式で出力し、出力したパスを返す。"
+                description="DataFrameを指定されたパスにCSV形式で出力し、出力したパスを返す。\n引数:\n- df (DataFrame): 出力するpandas DataFrame\n- output_path (str): 出力先のファイルパス"
             ),
             Tool(
                 name="analyze_data_tool",
                 func=self._analyze_data,
-                description="DataFrameの基本的な統計情報と構造を分析し、サマリーを返す。"
+                description="DataFrameの基本的な統計情報と構造を分析し、サマリーを返す。\n引数:\n- df (DataFrame): 分析対象のpandas DataFrame"
             )
         ]
     
@@ -63,6 +99,7 @@ class ReconciliationExpert(BaseTaskAgent):
             ロードしたDataFrame
         """
         try:
+            file_path = os.path.join(os.getcwd(), "data", "input", file_path.lstrip('/'))
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"ファイル '{file_path}' が見つかりません。")
             
@@ -87,7 +124,158 @@ class ReconciliationExpert(BaseTaskAgent):
                 raise ValueError(f"サポートされていないファイル形式です: {file_path}")
                 
         except Exception as e:
-            raise Exception(f"データのロード中にエラーが発生しました: {str(e)}")
+            raise Exception(f"データのロード中にエラーが発生しました: {str(e)} ※ファイルのパスを渡しているか確認してください。")
+    
+    def _get_artifact_data(self, artifact_key: str) -> Any:
+        """
+        required_artifactsから指定されたキーのデータを取得
+        
+        Args:
+            artifact_key: 取得したいデータのキー
+            
+        Returns:
+            指定されたキーに対応するデータ
+        """
+        try:
+            # BaseTaskAgent内からrequired_artifactsにアクセス
+            if hasattr(self, '_current_state') and self._current_state:
+                artifacts = self._current_state.required_artifacts
+                print(f"全artifacts取得: {list(artifacts.keys())}")
+                
+                # 現在のタスクの依存関係を確認
+                if self._current_state.task_to_perform and self._current_state.task_to_perform.dependencies:
+                    print(f"現在のタスクの依存関係: {self._current_state.task_to_perform.dependencies}")
+                    
+                    # 依存タスクIDを基にartifactsを探す
+                    for dep_id in self._current_state.task_to_perform.dependencies:
+                        dep_artifact_key = f"{dep_id}_result"
+                        if dep_artifact_key in artifacts:
+                            dep_data = artifacts[dep_artifact_key]
+                            print(f"依存タスク {dep_id} のデータ: タイプ {type(dep_data)}")
+                            
+                            if isinstance(dep_data, list) and len(dep_data) > 0:
+                                sample = dep_data[0]
+                                if isinstance(sample, dict):
+                                    sample_keys = list(sample.keys())
+                                    print(f"依存タスクデータのサンプルキー: {sample_keys}")
+                                    
+                                    # 売掛金データの特徴チェック  
+                                    if artifact_key in ['売掛金データ', '売掛金', 'billing']:
+                                        if any(k in sample_keys for k in ['billing_id', 'invoice_id']) and 'amount' in sample_keys:
+                                            print(f"売掛金データを依存タスクから発見: {dep_id}")
+                                            self.set_communication_to_supervisor(f"売掛金データを依存タスク {dep_id} から正常に取得しました（{len(dep_data)}件）")
+                                            return pd.DataFrame(dep_data)
+                                    
+                                    # 入金データの特徴チェック
+                                    elif artifact_key in ['入金データ', '入金', 'deposit']:
+                                        if any(k in sample_keys for k in ['deposit_id', 'payment_id']) and 'amount' in sample_keys:
+                                            print(f"入金データを依存タスクから発見: {dep_id}")
+                                            return pd.DataFrame(dep_data)
+                
+                # キーに完全一致するものを探す
+                if artifact_key in artifacts:
+                    return artifacts[artifact_key]
+                
+                # 部分一致でも探す（売掛金、入金などのキーワードで）
+                for key, value in artifacts.items():
+                    if artifact_key in key or any(keyword in key for keyword in ['売掛', '入金', 'billing', 'deposit']):
+                        if artifact_key in ['売掛金データ', '売掛金', 'billing'] and ('billing' in key or '売掛' in key):
+                            print(f"売掛金データを発見: キー '{key}' からデータを取得")
+                            return value
+                        elif artifact_key in ['入金データ', '入金', 'deposit'] and ('deposit' in key or '入金' in key):
+                            print(f"入金データを発見: キー '{key}' からデータを取得")
+                            return value
+                
+                # リストの形式で保存されている場合の処理
+                for key, value in artifacts.items():
+                    if isinstance(value, list) and len(value) > 0:
+                        # 売掛金データの特徴を確認
+                        if artifact_key in ['売掛金データ', '売掛金', 'billing']:
+                            sample = value[0]
+                            if isinstance(sample, dict) and any(k in sample for k in ['billing_id', 'amount', 'due_date']):
+                                print(f"売掛金データを発見: キー '{key}' からリストデータを変換")
+                                return pd.DataFrame(value)
+                        
+                        # 入金データの特徴を確認
+                        elif artifact_key in ['入金データ', '入金', 'deposit']:
+                            sample = value[0]
+                            if isinstance(sample, dict) and any(k in sample for k in ['deposit_id', 'deposit_date', 'amount']):
+                                print(f"入金データを発見: キー '{key}' からリストデータを変換")
+                                return pd.DataFrame(value)
+                
+                # タスクIDベースでartifactsを検索（より詳細な検索）
+                print(f"詳細検索: 利用可能なartifacts keys: {list(artifacts.keys())}")
+                for key, value in artifacts.items():
+                    print(f"キー '{key}': タイプ {type(value)}, サイズ {len(value) if hasattr(value, '__len__') else 'N/A'}")
+                    if isinstance(value, list) and len(value) > 0:
+                        sample = value[0]
+                        print(f"  サンプル: {sample}")
+                        if isinstance(sample, dict):
+                            sample_keys = list(sample.keys())
+                            print(f"  サンプルキー: {sample_keys}")
+                            
+                            # 売掛金データの詳細チェック
+                            if artifact_key in ['売掛金データ', '売掛金', 'billing']:
+                                if any(k in sample_keys for k in ['billing_id', 'invoice_id']) and 'amount' in sample_keys:
+                                    print(f"売掛金データを発見: キー '{key}' からリストデータを変換")
+                                    return pd.DataFrame(value)
+                            
+                            # 入金データの詳細チェック
+                            elif artifact_key in ['入金データ', '入金', 'deposit']:
+                                if any(k in sample_keys for k in ['deposit_id', 'payment_id']) and 'amount' in sample_keys:
+                                    print(f"入金データを発見: キー '{key}' からリストデータを変換")
+                                    return pd.DataFrame(value)
+                
+                # 利用可能なキーを表示
+                available_keys = list(artifacts.keys())
+                
+                # Supervisorに状況を報告
+                self.set_communication_to_supervisor(
+                    f"データ取得に問題があります。期待されたキー '{artifact_key}' がartifactsに見つかりません。"
+                    f"利用可能なキー: {available_keys}。前のタスクでデータ取得が適切に行われていない可能性があります。"
+                )
+                
+                return f"指定されたキー '{artifact_key}' が見つかりません。利用可能なキー: {available_keys}"
+            else:
+                return "required_artifactsにアクセスできません。"
+                
+        except Exception as e:
+            return f"artifact取得中にエラーが発生しました: {str(e)}"
+    
+    def _list_available_artifacts(self) -> str:
+        """
+        利用可能なartifactsの一覧を表示
+        
+        Returns:
+            利用可能なartifactsの説明
+        """
+        try:
+            if hasattr(self, '_current_state') and self._current_state:
+                artifacts = self._current_state.required_artifacts
+                
+                if not artifacts:
+                    return "利用可能なartifactsがありません。"
+                
+                print(f"[debug]利用可能なartifacts: {artifacts}")
+                result = "利用可能なartifacts:\n"
+                for key, value in artifacts.items():
+                    if isinstance(value, list):
+                        result += f"- {key}: リスト形式のデータ (件数: {len(value)})\n"
+                        if len(value) > 0 and isinstance(value[0], dict):
+                            sample_keys = list(value[0].keys())
+                            result += f"  サンプル列名: {sample_keys}\n"
+                    elif isinstance(value, pd.DataFrame):
+                        result += f"- {key}: DataFrame (行数: {len(value)}, 列数: {len(value.columns)})\n"
+                        result += f"  列名: {list(value.columns)}\n"
+                    else:
+                        result += f"- {key}: {value[:100]}\n"
+                
+                return result
+            else:
+                return "required_artifactsにアクセスできません。"
+                
+        except Exception as e:
+            return f"artifacts一覧取得中にエラーが発生しました: {str(e)}"
     
     def _find_matching_keys(self, df1_preview: Dict, df2_preview: Dict) -> List[Tuple[str, str]]:
         """
@@ -170,20 +358,24 @@ class ReconciliationExpert(BaseTaskAgent):
         
         return key_pairs if key_pairs else [(df1_cols[0], df2_cols[0])]
     
-    def _perform_reconciliation(self, deposit_df: pd.DataFrame, billing_df: pd.DataFrame, 
+    def _perform_reconciliation(self, deposit_file_path: str, billing_file_path: str, 
                               join_keys: List[str]) -> Dict[str, pd.DataFrame]:
         """
         消込処理を実行
         
         Args:
-            deposit_df: 入金データのDataFrame
-            billing_df: 売掛金データのDataFrame
+            deposit_file_path: 入金データのCSVファイルパス（data/input配下の相対パス）
+            billing_file_path: 売掛金データのCSVファイルパス（data/input配下の相対パス）
             join_keys: 突合に使用するキーのリスト
             
         Returns:
             消込済みと未消込のDataFrameを含む辞書
         """
         try:
+            # ファイルパスからDataFrameを読み込み
+            deposit_df = self._load_data(deposit_file_path)
+            billing_df = self._load_data(billing_file_path)
+            
             # タイムスタンプを追加
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             

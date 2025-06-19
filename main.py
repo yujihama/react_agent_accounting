@@ -137,6 +137,15 @@ def print_results(result):
 
 def run_cli():
     """CLIモードで実行（引数付き）"""
+    # 環境変数をロード
+    load_dotenv()
+    
+    # OpenAI APIキーの確認
+    if not os.getenv("OPENAI_API_KEY"):
+        print("エラー: OPENAI_API_KEY が設定されていません。")
+        print(".envファイルに OPENAI_API_KEY を設定してください。")
+        sys.exit(1)
+    
     if len(sys.argv) > 1:
         instruction = " ".join(sys.argv[1:])
         print(f"指示: {instruction}")

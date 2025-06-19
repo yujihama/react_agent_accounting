@@ -3,7 +3,7 @@ LangGraph ReAct型エージェント - 状態定義
 状態を明確に定義することで、エージェント間の情報伝達を安定させる。
 """
 
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 from pydantic import BaseModel, Field
 from enum import Enum
 import uuid
@@ -21,6 +21,7 @@ class TaskStatus(str, Enum):
 class ProcessStatus(str, Enum):
     """ワークフロー全体のステータス"""
     PLANNING = "planning"
+    AGENT_ASSIGNMENT = "agent_assignment"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
@@ -54,6 +55,120 @@ class Observation(BaseModel):
     """ツール実行結果の観察"""
     result: Any
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+# === ReAct Structured Output Models ===
+
+class ReActThought(BaseModel):
+    """ReActループの思考フェーズ"""
+    thought: str = Field(description="現在の状況分析と次の行動の判断")
+    is_complete: bool = Field(default=False, description="タスクが完了したかどうか")
+
+
+class ReActAction(BaseModel):
+    """ReActループのアクションフェーズ"""
+    action_name: str = Field(description="実行するツール名")
+    action_input: Optional[Dict[str, Any]] = Field(default_factory=dict, description="ツールに渡す引数")
+
+
+class ReActFinalAnswer(BaseModel):
+    """ReActループの最終回答"""
+    result: Any = Field(description="最終的な成果物（辞書、リスト、文字列など）")
+    summary: Optional[str] = Field(default=None, description="結果の要約説明（省略可能）")
+
+
+class BaseReActResponse(BaseModel):
+    """
+    ReActレスポンスの基底クラス
+    サブクラスでカスタマイズ可能な構造を提供
+    """
+    thought: ReActThought
+    action: Optional[ReActAction] = None
+    final_answer: Optional[ReActFinalAnswer] = None
+    
+    class Config:
+        # サブクラスでの拡張を許可
+        extra = "allow"
+    
+    def is_complete(self) -> bool:
+        """タスクが完了しているかチェック"""
+        return self.thought.is_complete or self.final_answer is not None
+    
+    def get_action_details(self) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """アクションの詳細を取得"""
+        if self.action:
+            return self.action.action_name, self.action.action_input
+        return None
+    
+    def get_final_result(self) -> Optional[Any]:
+        """最終結果を取得（辞書形式で包む）"""
+        if self.final_answer:
+            result = self.final_answer.result
+            # リストや単純な値の場合は、辞書に包む
+            if isinstance(result, dict):
+                return result
+            else:
+                return {"result": result}
+        return None
+
+
+# === 専門エージェント向けのカスタマイズ例 ===
+
+class FileSearchReActResponse(BaseReActResponse):
+    """ファイル検索エージェント専用のレスポンス形式（例）"""
+    found_files_path: List[str] = Field(default=None, description="発見されたファイルパスのリスト")
+
+
+class ReconciliationReActResponse(BaseReActResponse):
+    """照合エージェント専用のレスポンス形式（例）"""
+    reconciliation_status: Optional[str] = Field(default=None, description="照合の状況")
+    error_count: Optional[int] = Field(default=None, description="エラー件数")
+
+
+# === Supervisor用の判定モデル ===
+
+class TaskExecutionJudgment(BaseModel):
+    """
+    Supervisorがエージェントのタスク実行結果を判定するためのStructured Output
+    """
+    is_successful: bool = Field(
+        description="タスクが成功したかどうかの最終判定"
+    )
+    confidence_level: str = Field(
+        description="判定の信頼度 ('high', 'medium', 'low')"
+    )
+    reasoning: str = Field(
+        description="判定の根拠と理由"
+    )
+    identified_issues: Optional[List[str]] = Field(
+        default=None,
+        description="特定された問題点のリスト（失敗時またはpartial success時）"
+    )
+    required_actions: Optional[List[str]] = Field(
+        default=None,
+        description="失敗時に必要な対応アクション（将来の自動修正で使用予定）"
+    )
+
+
+class OptimizedTask(BaseModel):
+    """最適化されたタスクの定義"""
+    name: str = Field(description="タスク名")
+    description: str = Field(description="詳細な説明")
+    dependencies: List[str] = Field(default_factory=list, description="依存タスクIDのリスト")
+    expected_output_description: str = Field(description="期待される成果物の説明")
+    recommended_agent: Optional[str] = Field(default=None, description="推奨エージェント名")
+
+
+class TaskOptimizationResult(BaseModel):
+    """
+    エージェント割り当て最適化の結果を表すStructured Output
+    """
+    optimized_tasks: Dict[str, OptimizedTask] = Field(
+        description="最適化されたタスク計画。タスクIDをキーとする辞書"
+    )
+    optimization_summary: str = Field(
+        description="実行した最適化の概要説明"
+    )
 
 
 class GlobalAgentState(BaseModel):
@@ -127,6 +242,10 @@ class BaseTaskAgentState(BaseModel):
     status_report: str = Field(
         "pending",
         description="タスク実行の最終ステータス報告。"
+    )
+    communication_to_supervisor: Optional[str] = Field(
+        None,
+        description="エージェントからSupervisorへの詳細な伝達事項。成功・失敗の詳細、問題点、推奨事項などを記載。"
     )
     iteration_count: int = Field(
         0,

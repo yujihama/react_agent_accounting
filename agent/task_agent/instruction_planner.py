@@ -19,27 +19,57 @@ class InstructionPlanner(BaseTaskAgent):
     
     def get_agent_description(self) -> str:
         """エージェントの説明を返す"""
-        return "ユーザーの指示を解釈し、手順書を参照しながら具体的で実行可能なタスク計画を生成する専門家です。"
+        return """ユーザーの指示を解釈し、実行可能なタスク計画を効率的に生成する専門家です。
+
+重要な原則：
+1. 手順書検索は1-2回まで。関連ファイルが見つからなければ、一般的な知識に基づいてタスク計画を作成する
+2. タスク計画は具体的で実行可能なステップに分解する
+3. 過度に複雑な計画は避け、シンプルで効果的なアプローチを取る
+4. 依存関係を明確にして、並行実行可能なタスクは分離する"""
+    
+    def get_result_format(self) -> str:
+        """
+        エージェントの結果のフォーマットを返す
+        """
+        return "タスク計画: タスクIDをキーとしたタスク辞書"
     
     def get_tools(self) -> List[Tool]:
-        """InstructionPlanner固有のツールを返す"""
-        return [
+        """InstructionPlanner固有のツールを返す（共通ツールを含む）"""
+        return self.get_common_tools() + [
             Tool(
                 name="search_manuals_tool",
-                func=self._search_manuals,
-                description="指定されたキーワードに基づき、手順書ディレクトリ内から関連性の高い手順書ファイルを検索し、ファイルパスのリストを返す。"
+                func=self._search_manuals_wrapper,
+                description="指定されたキーワードに基づき、手順書ディレクトリ内から関連性の高い手順書ファイルを検索し、ファイルパスのリストを返す。\n引数:\n- keywords (list): 検索キーワードのリスト\n- keyword (str): 単一の検索キーワード（keywordsの代替）"
             ),
             Tool(
                 name="read_file_content_tool",
                 func=self._read_file_content,
-                description="指定されたファイルのテキスト内容をすべて読み込んで返す。"
+                description="指定されたファイルのテキスト内容をすべて読み込んで返す。\n引数:\n- file_path (str): 読み込むファイルのパス"
             ),
             Tool(
                 name="create_task_plan_tool",
-                func=self._create_task_plan,
-                description="タスクのリストを受け取り、適切な形式のタスク計画を生成する。"
+                func=self._create_task_plan_wrapper,
+                description="タスクのリストを受け取り、適切な形式のタスク計画を生成する。\n引数:\n- tasks (list): タスクデータのリスト\n- tasks_data (list): タスクデータのリスト（tasksの代替）"
             )
         ]
+    
+    def _search_manuals_wrapper(self, **kwargs) -> List[str]:
+        """
+        手順書検索のラッパー関数（LLMからの呼び出しに対応）
+        """
+        # 複数の引数形式に対応
+        keywords = kwargs.get('keywords')
+        if not keywords:
+            keyword = kwargs.get('keyword', '')
+            if isinstance(keyword, str):
+                keywords = [keyword] if keyword else []
+            else:
+                keywords = keyword if isinstance(keyword, list) else []
+        
+        if not keywords:
+            return ["エラー: 検索キーワードが指定されていません"]
+        
+        return self._search_manuals(keywords)
     
     def _search_manuals(self, keywords: List[str]) -> List[str]:
         """
@@ -95,34 +125,62 @@ class InstructionPlanner(BaseTaskAgent):
         except Exception as e:
             return f"エラー: ファイルの読み込み中にエラーが発生しました: {str(e)}"
     
+    def _create_task_plan_wrapper(self, **kwargs) -> Dict[str, Task]:
+        """タスク計画作成のラッパー関数"""
+        try:
+            # 引数からタスクリストを取得
+            tasks_data = kwargs.get('tasks', kwargs.get('tasks_data', []))
+            
+            if not tasks_data:
+                return {"error": "タスクデータが提供されていません"}
+            
+            return self._create_task_plan(tasks_data)
+            
+        except Exception as e:
+            return {"error": f"タスク計画の作成中にエラー: {str(e)}"}
+    
     def _create_task_plan(self, tasks_data: List[Dict[str, Any]]) -> Dict[str, Task]:
         """
         タスクデータからタスク計画を生成
         
         Args:
-            tasks_data: タスクデータのリスト。各要素は以下の形式：
-                {
-                    "name": "タスク名",
-                    "description": "タスクの説明",
-                    "dependencies": ["依存タスクID", ...],
-                    "expected_output_description": "期待される成果物の説明"
-                }
+            tasks_data: タスクデータのリスト
         
         Returns:
             タスクIDをキーとしたタスク辞書
         """
-        task_plan = {}
+        task_dict = {}
+        name_to_id_map = {}  # タスク名からIDへのマッピング
         
-        for i, task_data in enumerate(tasks_data):
+        # 最初にすべてのタスクを作成してIDマッピングを構築
+        for task_data in tasks_data:
             task = Task(
-                name=task_data.get("name", f"Task_{i+1}"),
-                description=task_data.get("description", ""),
-                dependencies=task_data.get("dependencies", []),
-                expected_output_description=task_data.get("expected_output_description", "")
+                name=task_data.get('name', ''),
+                description=task_data.get('description', ''),
+                dependencies=[],  # 一時的に空にしておく
+                expected_output_description=task_data.get('expected_output_description', '')
             )
-            task_plan[task.id] = task
+            task_dict[task.id] = task
+            name_to_id_map[task.name] = task.id
         
-        return task_plan
+        # 依存関係を解決
+        for task_data in tasks_data:
+            task_name = task_data.get('name', '')
+            if task_name in name_to_id_map:
+                task_id = name_to_id_map[task_name]
+                dependencies = task_data.get('dependencies', [])
+                
+                # 依存関係をタスクIDに変換
+                resolved_dependencies = []
+                for dep_name in dependencies:
+                    if dep_name in name_to_id_map:
+                        resolved_dependencies.append(name_to_id_map[dep_name])
+                    else:
+                        print(f"警告: 依存タスク '{dep_name}' が見つかりません")
+                
+                task_dict[task_id].dependencies = resolved_dependencies
+        
+        return task_dict
     
     def execute_task(self, state) -> Any:
         """
